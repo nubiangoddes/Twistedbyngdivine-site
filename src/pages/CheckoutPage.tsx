@@ -5,16 +5,20 @@ import { toast } from 'sonner';
 import { useCart } from '@/contexts/CartContext';
 import { SHIPPING_RATES, PROMO_CODES } from '@/constants/collections';
 import AnnouncementBar from '@/components/layout/AnnouncementBar';
-import { createClient } from '@supabase/supabase-js';
-import { FunctionsHttpError } from '@supabase/supabase-js';
 
-// Lazy factory — never crashes at module load when env vars are absent.
-// Only called at runtime when the customer actually submits the form.
-function getSupabase() {
-  const url = import.meta.env.VITE_SUPABASE_URL ?? '';
-  const key = import.meta.env.VITE_SUPABASE_ANON_KEY ?? '';
-  if (!url || !key) return null;
-  return createClient(url, key);
+// Edge function base URL — hardcoded so the site works on any deployment
+// without requiring environment variables.
+const EDGE_BASE = 'https://rigaqlfyiratjrdsriga.backend.onspace.ai/functions/v1';
+
+async function invokeEdgeFunction(name: string, body: unknown) {
+  const res = await fetch(`${EDGE_BASE}/${name}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error ?? `Edge function error ${res.status}`);
+  return data;
 }
 
 interface FormData {
@@ -81,15 +85,9 @@ export default function CheckoutPage() {
     setLoading(true);
     console.log('Creating Stripe checkout session…', { items, total });
 
-    const supabase = getSupabase();
-    if (!supabase) {
-      toast.error('Checkout is not configured. Please contact twistedbyngdivine@gmail.com to place your order.');
-      setLoading(false);
-      return;
-    }
-
-    const { data, error } = await supabase.functions.invoke('create-payment', {
-      body: {
+    let data: { url?: string } | null = null;
+    try {
+      data = await invokeEdgeFunction('create-payment', {
         items: items.map(item => ({
           collectionName: item.collectionName,
           colorStory: item.colorStory,
@@ -105,21 +103,10 @@ export default function CheckoutPage() {
         },
         promoCode: appliedPromo?.code,
         promoDiscount: appliedPromo?.discount,
-      },
-    });
-
-    if (error) {
-      let errorMessage = error.message;
-      if (error instanceof FunctionsHttpError) {
-        try {
-          const statusCode = error.context?.status ?? 500;
-          const textContent = await error.context?.text();
-          errorMessage = `[Code: ${statusCode}] ${textContent || error.message}`;
-        } catch {
-          errorMessage = error.message || 'Failed to read response';
-        }
-      }
-      console.error('Stripe checkout error:', errorMessage);
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Unknown error';
+      console.error('Stripe checkout error:', msg);
       toast.error('Payment setup failed. Please try again.');
       setLoading(false);
       return;

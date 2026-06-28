@@ -1,16 +1,19 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import { createClient } from '@supabase/supabase-js';
 import { useCart } from '@/contexts/CartContext';
 
-// Lazy client — avoids module-level crash when env vars are absent (e.g. Vercel
-// deployment before env vars are configured). The client is only used at
-// runtime inside useEffect, so an empty-string fallback is safe here.
-function getSupabase() {
-  const url = import.meta.env.VITE_SUPABASE_URL ?? '';
-  const key = import.meta.env.VITE_SUPABASE_ANON_KEY ?? '';
-  if (!url || !key) return null;
-  return createClient(url, key);
+// Direct edge function call — no env vars required on any deployment.
+const EDGE_BASE = 'https://rigaqlfyiratjrdsriga.backend.onspace.ai/functions/v1';
+
+async function invokeEdgeFunction(name: string, body: unknown) {
+  const res = await fetch(`${EDGE_BASE}/${name}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error ?? `Edge function error ${res.status}`);
+  return data;
 }
 
 type Status = 'loading' | 'success' | 'cancelled' | 'error';
@@ -40,20 +43,17 @@ export default function OrderConfirmationPage() {
     async function verifySession() {
       try {
         console.log('Verifying Stripe session:', sessionId);
-        const supabase = getSupabase();
-        if (!supabase) {
-          console.warn('Supabase env vars not configured — skipping verification.');
+        let data: { paymentStatus?: string; status?: string; customerEmail?: string; orderNumber?: string } | null = null;
+        try {
+          data = await invokeEdgeFunction('verify-payment', { sessionId });
+        } catch (fetchErr) {
+          console.warn('Verification fetch error (non-critical):', fetchErr);
           clearCart();
           setStatus('success');
           return;
         }
-        const { data, error } = await supabase.functions.invoke('verify-payment', {
-          body: { sessionId },
-        });
 
-        if (error || !data) {
-          console.warn('Verification error (non-critical):', error?.message);
-          // Even if verification fails, Stripe already handled payment — show success
+        if (!data) {
           clearCart();
           setStatus('success');
           return;
